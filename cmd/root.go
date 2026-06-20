@@ -123,6 +123,7 @@ func init() {
 	RootCmd.AddCommand(installation.Cmd)
 	RootCmd.AddCommand(mod.Cmd)
 	RootCmd.AddCommand(smr.Cmd)
+	RootCmd.AddCommand(saveCmd)
 
 	var baseLocalDir string
 

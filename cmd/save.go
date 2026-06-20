@@ -21,6 +21,7 @@ var (
 	removeCreatures bool
 	removeRocks     bool
 	removeDeposits  bool
+	removeCrates    bool
 )
 
 var saveCmd = &cobra.Command{
@@ -32,6 +33,7 @@ type CleanResult struct {
 	CreaturesRemoved  int `json:"creaturesRemoved"`
 	RocksRemoved      int `json:"rocksRemoved"`
 	DepositsRemoved   int `json:"depositsRemoved"`
+	CratesRemoved     int `json:"cratesRemoved"`
 	FoliageResetCount int `json:"foliageResetCount"`
 	TotalBefore       int `json:"totalBefore"`
 	TotalAfter        int `json:"totalAfter"`
@@ -313,7 +315,7 @@ var cleanCmd = &cobra.Command{
 
 		fmt.Println("Cleaning save file, please wait...")
 
-		result, err := cleanSaveFile(absInputPath, outputPath, resetFoliage, removeCreatures, removeRocks, removeDeposits)
+		result, err := cleanSaveFile(absInputPath, outputPath, resetFoliage, removeCreatures, removeRocks, removeDeposits, removeCrates)
 		if err != nil {
 			return fmt.Errorf("save clean failed: %w", err)
 		}
@@ -330,6 +332,9 @@ var cleanCmd = &cobra.Command{
 		if removeDeposits {
 			fmt.Printf("  - Resource deposits removed:  %d\n", result.DepositsRemoved)
 		}
+		if removeCrates {
+			fmt.Printf("  - Dismantle/Death crates removed: %d\n", result.CratesRemoved)
+		}
 		if resetFoliage {
 			fmt.Printf("  - Foliage cells reset:  %d (previously chopped trees/bushes regrown)\n", result.FoliageResetCount)
 		}
@@ -340,7 +345,7 @@ var cleanCmd = &cobra.Command{
 }
 
 // cleanSaveFile is the native Go implementation for parsing, cleaning, and writing Satisfactory saves.
-func cleanSaveFile(inputPath string, outputPath string, resetFoliage, removeCreatures, removeRocks, removeDeposits bool) (CleanResult, error) {
+func cleanSaveFile(inputPath string, outputPath string, resetFoliage, removeCreatures, removeRocks, removeDeposits, removeCrates bool) (CleanResult, error) {
 	var result CleanResult
 	file, err := os.Open(inputPath)
 	if err != nil {
@@ -590,10 +595,11 @@ func cleanSaveFile(inputPath string, outputPath string, resetFoliage, removeCrea
 		}
 	}
 
-	// Filter creatures, spawners, rocks, and deposits
+	// Filter creatures, spawners, rocks, deposits, and crates
 	var removedCount int
 	var rocksRemovedCount int
 	var depositsRemovedCount int
+	var cratesRemovedCount int
 	var totalBefore int
 	var totalAfter int
 	var foliageResetCount int
@@ -614,6 +620,9 @@ func cleanSaveFile(inputPath string, outputPath string, resetFoliage, removeCrea
 			} else if removeDeposits && strings.Contains(obj.TypePath, "BP_ResourceDeposit") {
 				shouldRemove = true
 				depositsRemovedCount++
+			} else if removeCrates && strings.Contains(obj.TypePath, "BP_Crate") {
+				shouldRemove = true
+				cratesRemovedCount++
 			}
 
 			if shouldRemove {
@@ -838,6 +847,7 @@ func cleanSaveFile(inputPath string, outputPath string, resetFoliage, removeCrea
 	result.CreaturesRemoved = removedCount
 	result.RocksRemoved = rocksRemovedCount
 	result.DepositsRemoved = depositsRemovedCount
+	result.CratesRemoved = cratesRemovedCount
 	result.FoliageResetCount = foliageResetCount
 
 	return result, nil
@@ -849,6 +859,7 @@ func init() {
 	cleanCmd.Flags().BoolVar(&removeCreatures, "remove-creatures", true, "Remove all creatures/critters")
 	cleanCmd.Flags().BoolVar(&removeRocks, "remove-rocks", false, "Remove all destructible cracked boulders")
 	cleanCmd.Flags().BoolVar(&removeDeposits, "remove-deposits", false, "Remove all temporary resource node deposits")
+	cleanCmd.Flags().BoolVar(&removeCrates, "remove-crates", false, "Remove all dismantle/death crates")
 
 	saveCmd.AddCommand(cleanCmd)
 }

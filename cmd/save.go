@@ -273,8 +273,63 @@ func readDestroyedActorsMapRaw(r io.Reader) ([]byte, error) {
 		writeString(&buf, level)
 		binary.Write(&buf, binary.LittleEndian, numDestroyed)
 		for j := 0; j < int(numDestroyed); j++ {
-			path, _ := readString(r)
-			writeString(&buf, path)
+			ref, _ := readObjectReference(r)
+			writeObjectReference(&buf, ref)
+		}
+	}
+	return buf.Bytes(), nil
+}
+
+func parseDestroyedActorsMap(data []byte) (map[string][]ObjectReference, error) {
+	if len(data) == 0 {
+		return make(map[string][]ObjectReference), nil
+	}
+	r := bytes.NewReader(data)
+	var count int32
+	if err := binary.Read(r, binary.LittleEndian, &count); err != nil {
+		return nil, err
+	}
+	res := make(map[string][]ObjectReference)
+	for i := 0; i < int(count); i++ {
+		level, err := readString(r)
+		if err != nil {
+			return nil, err
+		}
+		var numDestroyed int32
+		if err := binary.Read(r, binary.LittleEndian, &numDestroyed); err != nil {
+			return nil, err
+		}
+		refs := make([]ObjectReference, numDestroyed)
+		for j := 0; j < int(numDestroyed); j++ {
+			ref, err := readObjectReference(r)
+			if err != nil {
+				return nil, err
+			}
+			refs[j] = ref
+		}
+		res[level] = refs
+	}
+	return res, nil
+}
+
+func serializeDestroyedActorsMap(m map[string][]ObjectReference) ([]byte, error) {
+	var buf bytes.Buffer
+	count := int32(len(m))
+	if err := binary.Write(&buf, binary.LittleEndian, count); err != nil {
+		return nil, err
+	}
+	for level, refs := range m {
+		if err := writeString(&buf, level); err != nil {
+			return nil, err
+		}
+		numDestroyed := int32(len(refs))
+		if err := binary.Write(&buf, binary.LittleEndian, numDestroyed); err != nil {
+			return nil, err
+		}
+		for _, ref := range refs {
+			if err := writeObjectReference(&buf, ref); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return buf.Bytes(), nil
@@ -604,12 +659,54 @@ func cleanSaveFile(inputPath string, outputPath string, resetFoliage, removeCrea
 	var totalAfter int
 	var foliageResetCount int
 
+	var persistentLvl *Level
 	for _, lvl := range levels {
+		if lvl != nil && lvl.Name == save.MapName {
+			persistentLvl = lvl
+			break
+		}
+	}
+
+	var destroyedMap map[string][]ObjectReference
+	if persistentLvl != nil {
+		var err error
+		destroyedMap, err = parseDestroyedActorsMap(persistentLvl.DestroyedActorsMap)
+		if err != nil {
+			destroyedMap = make(map[string][]ObjectReference)
+		}
+	} else {
+		destroyedMap = make(map[string][]ObjectReference)
+	}
+
+	for _, lvl := range levels {
+		if lvl == nil {
+			continue
+		}
 		totalBefore += len(lvl.Objects)
 		filtered := []*LevelObject{}
 		for _, obj := range lvl.Objects {
+			if obj == nil {
+				continue
+			}
 			shouldRemove := false
-			if removeCreatures && strings.Contains(strings.ToLower(obj.TypePath), "/creature/") {
+
+			isCreature := false
+			if removeCreatures {
+				tpLower := strings.ToLower(obj.TypePath)
+				instLower := strings.ToLower(obj.InstanceName)
+				parentLower := strings.ToLower(obj.ParentEntityName)
+				if strings.Contains(tpLower, "/creature/") ||
+					strings.Contains(instLower, "char_spacegiraffe_c") ||
+					strings.Contains(instLower, "char_cavewhale_c") ||
+					strings.Contains(instLower, "char_giantflyingbird_c") ||
+					strings.Contains(parentLower, "char_spacegiraffe_c") ||
+					strings.Contains(parentLower, "char_cavewhale_c") ||
+					strings.Contains(parentLower, "char_giantflyingbird_c") {
+					isCreature = true
+				}
+			}
+
+			if removeCreatures && isCreature {
 				shouldRemove = true
 				removedCount++
 			} else if removeRocks && (strings.Contains(obj.TypePath, "BP_DestructibleFlatRock") ||
@@ -626,7 +723,37 @@ func cleanSaveFile(inputPath string, outputPath string, resetFoliage, removeCrea
 			}
 
 			if shouldRemove {
-				// skip
+				var actorName string
+				if obj.HeaderType == 1 {
+					actorName = obj.InstanceName
+				} else {
+					actorName = obj.ParentEntityName
+				}
+				if actorName != "" {
+					parts := strings.SplitN(actorName, ":", 2)
+					var levelName, pathName string
+					if len(parts) == 2 {
+						levelName = parts[0]
+						pathName = parts[1]
+					} else {
+						levelName = "Persistent_Level"
+						pathName = actorName
+					}
+					ref := ObjectReference{
+						LevelName: levelName,
+						PathName:  pathName,
+					}
+					exists := false
+					for _, r := range destroyedMap[levelName] {
+						if r.LevelName == ref.LevelName && r.PathName == ref.PathName {
+							exists = true
+							break
+						}
+					}
+					if !exists {
+						destroyedMap[levelName] = append(destroyedMap[levelName], ref)
+					}
+				}
 			} else {
 				if resetFoliage && strings.Contains(obj.TypePath, "FGFoliageRemovalSubsystem") {
 					payloadBytes, err := hex.DecodeString("00000000000000000000000000160000006d5361766564466f6c696167654772696453697a65000f00000055496e74333250726f706572747900000000000400000000001900000a0000006d5361766544617461000c0000004d617050726f706572747900020000000f00000053747275637450726f706572747900010000000a000000496e74566563746f720001000000140000002f5363726970742f436f7265554f626a65637400000000000f00000053747275637450726f706572747900010000001e000000466f6c6961676552656d6f76616c536176654461746150657243656c6c0001000000140000002f5363726970742f466163746f727947616d65000000000008000000080000000000000000050000004e6f6e650000000000")
@@ -646,6 +773,46 @@ func cleanSaveFile(inputPath string, outputPath string, resetFoliage, removeCrea
 		}
 		lvl.Objects = filtered
 		totalAfter += len(lvl.Objects)
+	}
+
+	if removeCreatures {
+		mantaPaths := []string{
+			"PersistentLevel.Char_GiantFlyingBird_C_0",
+			"PersistentLevel.Char_GiantFlyingBird_C_1",
+			"PersistentLevel.Char_GiantFlyingBird_C",
+			"PersistentLevel.Char_CaveWhale_C_0",
+			"PersistentLevel.Char_CaveWhale_C_1",
+			"PersistentLevel.Char_CaveWhale_C_2",
+			"PersistentLevel.Char_CaveWhale_C_3",
+			"PersistentLevel.Char_SpaceGiraffe_C_0",
+			"PersistentLevel.Char_SpaceGiraffe_C_1",
+			"PersistentLevel.Char_SpaceGiraffe_C_2",
+			"PersistentLevel.Char_SpaceGiraffe_C_3",
+		}
+		for _, pathName := range mantaPaths {
+			ref := ObjectReference{
+				LevelName: "Persistent_Level",
+				PathName:  pathName,
+			}
+			exists := false
+			for _, r := range destroyedMap["Persistent_Level"] {
+				if r.LevelName == ref.LevelName && r.PathName == ref.PathName {
+					exists = true
+					break
+				}
+			}
+			if !exists {
+				destroyedMap["Persistent_Level"] = append(destroyedMap["Persistent_Level"], ref)
+			}
+		}
+	}
+
+	if persistentLvl != nil {
+		newBytes, err := serializeDestroyedActorsMap(destroyedMap)
+		if err == nil {
+			persistentLvl.DestroyedActorsMap = newBytes
+			persistentLvl.WritesDestroyedActorsInTOCBlob = true
+		}
 	}
 
 	// Serialize back
